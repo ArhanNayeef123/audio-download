@@ -1,7 +1,7 @@
 {
   "name": "youtube-audio-backend",
   "version": "1.0.0",
-  "description": "YouTube Audio Extractor Engine",
+  "description": "YouTube Audio Extractor Engine with Cookies",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
