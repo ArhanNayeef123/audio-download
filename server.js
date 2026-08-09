@@ -2,56 +2,75 @@ const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const ytdl = require('@distube/ytdl-core');
+const axios = require('axios');
 
-// Set static binary path for FFmpeg
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Custom headers to prevent YouTube from blocking Render server requests
-const ytdlOptions = {
-  requestOptions: {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
-      'Accept-Language': 'en-US,en;q=0.9',
-    }
-  }
-};
+// Piped API Public Instances (Automatic Failover)
+const PIPED_INSTANCES = [
+  'https://pipedapi.kavin.rocks',
+  'https://api.piped.video',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.adminforge.de'
+];
 
-// Helper function to validate and extract video URL
-function cleanUrl(url) {
+// Extract YouTube Video ID
+function extractVideoId(url) {
   if (!url) return null;
-  return ytdl.validateURL(url) ? url : null;
+  const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|shorts\/|watch\?.+&v=))([\w-]{11})/);
+  return match ? match[1] : null;
 }
 
-// Health Check Route
-app.get('/', (req, res) => res.send('Audio Server Active and Running.'));
+// Fetch direct audio stream URL from Piped API
+async function getAudioStreamDetails(videoId) {
+  for (const instance of PIPED_INSTANCES) {
+    try {
+      const response = await axios.get(`${instance}/streams/${videoId}`, { timeout: 5000 });
+      if (response.data && response.data.audioStreams && response.data.audioStreams.length > 0) {
+        // Sort streams to get highest quality audio
+        const sortedAudio = response.data.audioStreams.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+        return {
+          title: response.data.title || 'audio',
+          downloadUrl: sortedAudio[0].url
+        };
+      }
+    } catch (err) {
+      console.log(`Instance ${instance} failed, trying next...`);
+    }
+  }
+  throw new Error('All Piped instances failed to fetch stream.');
+}
+
+app.get('/', (req, res) => res.send('Backend Engine Online'));
 
 // ROUTE 1: Standard Audio Download (Shorts / Long)
 app.get('/download-standard', async (req, res) => {
-  const videoUrl = cleanUrl(req.query.url);
+  const videoUrl = req.query.url;
+  const videoId = extractVideoId(videoUrl);
 
-  if (!videoUrl) {
-    return res.status(400).json({ error: 'Please provide a valid YouTube link using ?url=' });
+  if (!videoId) {
+    return res.status(400).json({ error: 'Please enter a valid YouTube link.' });
   }
 
   try {
-    const info = await ytdl.getInfo(videoUrl, ytdlOptions);
-    const title = info.videoDetails.title.replace(/[^\w\s.-]/gi, '') || 'audio';
+    const { title, downloadUrl } = await getAudioStreamDetails(videoId);
+    const cleanTitle = title.replace(/[^\w\s.-]/gi, '') || 'audio';
 
-    res.header('Content-Disposition', `attachment; filename="${title}_standard.mp3"`);
+    res.header('Content-Disposition', `attachment; filename="${cleanTitle}_standard.mp3"`);
     res.header('Content-Type', 'audio/mpeg');
 
-    const audioStream = ytdl(videoUrl, {
-      filter: 'audioonly',
-      quality: 'highestaudio',
-      ...ytdlOptions
+    // Download stream & convert to MP3 via FFmpeg
+    const audioStream = await axios({
+      method: 'get',
+      url: downloadUrl,
+      responseType: 'stream'
     });
 
-    ffmpeg(audioStream)
+    ffmpeg(audioStream.data)
       .format('mp3')
       .on('error', (err) => console.error('Stream Error:', err.message))
       .pipe(res, { end: true });
@@ -64,30 +83,32 @@ app.get('/download-standard', async (req, res) => {
 
 // ROUTE 2: Modified Audio (0.4x Speed, 0.5 Pitch, +40% Bass Boost)
 app.get('/download-fx', async (req, res) => {
-  const videoUrl = cleanUrl(req.query.url);
+  const videoUrl = req.query.url;
+  const videoId = extractVideoId(videoUrl);
 
-  if (!videoUrl) {
-    return res.status(400).json({ error: 'Please provide a valid YouTube link using ?url=' });
+  if (!videoId) {
+    return res.status(400).json({ error: 'Please enter a valid YouTube link.' });
   }
 
   try {
-    const info = await ytdl.getInfo(videoUrl, ytdlOptions);
-    const title = info.videoDetails.title.replace(/[^\w\s.-]/gi, '') || 'audio';
+    const { title, downloadUrl } = await getAudioStreamDetails(videoId);
+    const cleanTitle = title.replace(/[^\w\s.-]/gi, '') || 'audio';
 
-    res.header('Content-Disposition', `attachment; filename="${title}_modded.mp3"`);
+    res.header('Content-Disposition', `attachment; filename="${cleanTitle}_modded.mp3"`);
     res.header('Content-Type', 'audio/mpeg');
 
-    const audioStream = ytdl(videoUrl, {
-      filter: 'audioonly',
-      quality: 'highestaudio',
-      ...ytdlOptions
+    const audioStream = await axios({
+      method: 'get',
+      url: downloadUrl,
+      responseType: 'stream'
     });
 
-    ffmpeg(audioStream)
+    // Apply FFmpeg filters: +40% Bass Boost, 0.5 Pitch, 0.4x Speed
+    ffmpeg(audioStream.data)
       .audioFilters([
-        'equalizer=f=60:width_type=h:width=50:g=4', // +40% Bass Boost (+4dB around 60Hz)
-        'asetrate=44100*0.5',                       // 0.5x Pitch Shift
-        'atempo=0.8'                                // ~0.4x Speed Adjustment
+        'equalizer=f=60:width_type=h:width=50:g=4',
+        'asetrate=44100*0.5',
+        'atempo=0.8'
       ])
       .format('mp3')
       .on('error', (err) => console.error('FX Stream Error:', err.message))
@@ -100,4 +121,5 @@ app.get('/download-fx', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
