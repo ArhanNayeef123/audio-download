@@ -12,54 +12,48 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Set up cookies file path
-const cookiesPath = path.join(__dirname, 'cookies.txt');
+// Absolute path to cookies file
+const cookiesPath = path.resolve(__dirname, 'cookies.txt');
 
-// If cookies exist in environment variables (for safe deployment on Render), write them to file
-if (process.env.YOUTUBE_COOKIES && !fs.existsSync(cookiesPath)) {
-  fs.writeFileSync(cookiesPath, process.env.YOUTUBE_COOKIES);
-  console.log('Loaded cookies from environment variable.');
-}
-
-// Helper function to extract direct audio stream using yt-dlp & cookies
+// Extract direct stream URL using yt-dlp & cookies
 async function getAudioInfo(url) {
   try {
-    const options = {
+    const flags = {
       dumpSingleJson: true,
       noWarnings: true,
-      noCallHome: true,
-      noCheckCertificate: true,
+      noCheckCertificates: true,
       format: 'bestaudio/best'
     };
 
-    // Attach cookies if the file exists
+    // If cookies.txt exists on disk, pass it to yt-dlp
     if (fs.existsSync(cookiesPath)) {
-      options.cookies = cookiesPath;
+      flags.cookies = cookiesPath;
+      console.log('Using cookies.txt for request authentication.');
+    } else {
+      console.warn('WARNING: cookies.txt file not found! Request might get blocked.');
     }
 
-    const output = await youtubeDl(url, options);
+    const output = await youtubeDl(url, flags);
 
     return {
       title: output.title || 'youtube_audio',
       streamUrl: output.url
     };
   } catch (err) {
-    console.error('yt-dlp extraction error:', err.stderr || err.message);
-    throw new Error('Could not extract YouTube audio.');
+    console.error('yt-dlp execution error:', err.stderr || err.message);
+    throw new Error('Failed to extract audio stream from YouTube.');
   }
 }
 
-// Health Check Route
-app.get('/', (req, res) => res.send('Audio Extractor Backend Active with Cookies.'));
+// Health Check
+app.get('/', (req, res) => res.send('Audio Processing Backend Engine Active'));
 
-// ==========================================
-// SECTION 1: STANDARD AUDIO DOWNLOAD
-// ==========================================
+// ROUTE 1: Standard Audio Download
 app.get('/download-standard', async (req, res) => {
   const videoUrl = req.query.url;
 
   if (!videoUrl) {
-    return res.status(400).json({ error: 'Please enter a valid YouTube URL using ?url=' });
+    return res.status(400).json({ error: 'Please enter a valid YouTube link using ?url=' });
   }
 
   try {
@@ -71,7 +65,7 @@ app.get('/download-standard', async (req, res) => {
 
     ffmpeg(streamUrl)
       .format('mp3')
-      .on('error', (err) => console.error('FFmpeg Stream Error:', err.message))
+      .on('error', (err) => console.error('Standard Stream Error:', err.message))
       .pipe(res, { end: true });
 
   } catch (err) {
@@ -80,14 +74,12 @@ app.get('/download-standard', async (req, res) => {
   }
 });
 
-// ==========================================
-// SECTION 2: MODIFIED AUDIO FX (Slow, Pitch, Bass)
-// ==========================================
+// ROUTE 2: Modified Audio FX (0.4x Speed, 0.5 Pitch, +40% Bass Boost)
 app.get('/download-fx', async (req, res) => {
   const videoUrl = req.query.url;
 
   if (!videoUrl) {
-    return res.status(400).json({ error: 'Please enter a valid YouTube URL using ?url=' });
+    return res.status(400).json({ error: 'Please enter a valid YouTube link using ?url=' });
   }
 
   try {
@@ -97,7 +89,6 @@ app.get('/download-fx', async (req, res) => {
     res.header('Content-Disposition', `attachment; filename="${cleanTitle}_modded.mp3"`);
     res.header('Content-Type', 'audio/mpeg');
 
-    // Audio Filters: +40% Bass Boost, 0.5 Pitch, ~0.4x Speed
     ffmpeg(streamUrl)
       .audioFilters([
         'equalizer=f=60:width_type=h:width=50:g=4',
